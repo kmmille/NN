@@ -117,9 +117,7 @@ def tile_data(img, out_shape):
   reps = np.ceil(np.asarray(out_shape)/np.asarray(img.shape)).astype(int)
   tiled_img = np.tile(img,reps)
   out_img = tiled_img[:out_shape[0],:out_shape[1],:out_shape[2]]
-
   return out_img
-
 
 def create_result_dir(args):
   result_dir = 'results/' + os.path.basename(args.model).split('.')[0]
