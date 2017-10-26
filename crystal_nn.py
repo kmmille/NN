@@ -13,10 +13,7 @@ from chainer import Variable
 from multiprocessing import Process
 from multiprocessing import Queue
 
-import argparse
 import chainer
-import imp
-import logging
 import numpy as np
 import os
 import shutil
@@ -24,6 +21,7 @@ import six
 import sys
 import time
 import itertools
+import h5py
 
 
 from pymatgen.core.structure import Structure
@@ -90,8 +88,7 @@ def make_crystal_img(cif_str, resolution=0.5):
           return 'failed'
   return img
 
-
-def offset_data(img, offset=None):
+def offset_img(img, offset=None):
   if offset==None:
     xoffset = np.random.randint(0,img.shape[0])
     yoffset = np.random.randint(0,img.shape[1])
@@ -103,7 +100,7 @@ def offset_data(img, offset=None):
 
   return np.roll(img,(xoffset,yoffset,zoffset),(0,1,2))
 
-def rotate_data(img, rotation=None):
+def rotate_img(img, rotation=None):
   if rotation == None:
     rotation = np.random.randint(0,4,3)
   img = np.rot90(img,rotation[0],(0,1))
@@ -111,104 +108,53 @@ def rotate_data(img, rotation=None):
   img = np.rot90(img,rotation[2],(2,0))
   return img
 
-def tile_data(img, out_shape):
+def tile_img(img, out_shape):
   reps = np.ceil(np.asarray(out_shape)/np.asarray(img.shape)).astype(int)
   tiled_img = np.tile(img,reps)
-  out_img = tiled_img[:out_shape[0],:out_shape[1],:out_shape[2]]
+  out_img = tiled_img[:out_shape[0],:out_shape[1],:out_shape[2],:]
   return out_img
 
-def create_result_dir(args):
-  result_dir = 'results/' + os.path.basename(args.model).split('.')[0]
-  result_dir += '_' + time.strftime('%Y-%m-%d_%H-%M-%S_')
-  result_dir += str(time.time()).replace('.', '')
-  if not os.path.exists(result_dir):
-    os.makedirs(result_dir)
-  log_fn = '%s/log.txt' % result_dir
-  logging.basicConfig(
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    filename=log_fn, level=logging.DEBUG)
-  logging.info(args)
+def load_data(data_file):
+  data = h5py.File(data_file,'r')
 
-  args.log_fn = log_fn
-  args.result_dir = result_dir
+  labels = []
+  imgs = []
+  for im in data['Unstable'].keys():
+    labels.append(np.array([0,1]))
+    imgs.append(data['Unstable'][im])
+  for im in data['Stable'].keys():
+    labels.append(np.array([1,0]))
+    imgs.append(data['Stable'][im])
 
+  return data, labels
 
-def get_model_optimizer(args):
-  model_fn = os.path.basename(args.model)
-  model = imp.load_source(model_fn.split('.')[0], args.model).model
-
-  dst = '%s/%s' % (args.result_dir, model_fn)
-  if not os.path.exists(dst):
-    shutil.copy(args.model, dst)
-
-  dst = '%s/%s' % (args.result_dir, os.path.basename(__file__))
-  if not os.path.exists(dst):
-    shutil.copy(__file__, dst)
-
-  # prepare model
-  if args.gpu >= 0:
-    cuda.get_device(args.gpu).use()
-    model.to_gpu()
-
-  # prepare optimizer
-  if 'opt' in args:
-    # prepare optimizer
-    if args.opt == 'MomentumSGD':
-      optimizer = optimizers.MomentumSGD(lr=args.lr, momentum=0.9)
-    elif args.opt == 'Adam':
-      optimizer = optimizers.Adam(alpha=args.alpha)
-    elif args.opt == 'AdaGrad':
-      optimizer = optimizers.AdaGrad(lr=args.lr)
-    else:
-      raise Exception('No optimizer is selected')
-
-    optimizer.setup(model)
-
-    if args.opt == 'MomentumSGD':
-      optimizer.add_hook(
-        chainer.optimizer.WeightDecay(args.weight_decay))
-    return model, optimizer
-  else:
-    print('No optimizer generated.')
-    return model
-
-
-def one_epoch_resnet(args,model,optimizer,cif_data,cif_labels,epoch,train):
+def one_epoch(parameters,model,optimizer,img_data,img_labels,epoch,train):
   model.train = train
 
-  xp = cuda.cupy if args.gpu >= 0 else np
+  xp = cuda.cupy if parameters['gpu'] >= 0 else np
+  GPU_on = True if parameters['gpu'] >= 0 else False
 
-  
-  GPU_on = True if args.gpu >= 0 else False
-  # logging.info('data loading started')
-
-  #transfered model to gpu in get_model_optimizer
-  #optimizer setup model called in get_model_optimizer
-
-  L_Y_train = len(cif_labels)
+  L_Y_train = len(img_labels)
   time1 = time.time()
 
   np.random.seed(int(time.time()))
-  perm = np.random.permutation(cif_data.shape[0])
-  data = cif_data[perm]
-  label = cif_labels[perm]
+  perm = np.random.permutation(L_Y_train)
 
   sum_accuracy = 0
   sum_loss = 0
   num = 0
-  for i in range(0,data.shape[0],args.batchsize):
-    data_batch = data[i:i+args.batchsize]
-    label_batch =label[i:i+args.batchsize]
-
+  for i in range(0,L_Y_train,parameters['batchsize']):
     if train:
-      data_batch = augment_data(data_batch, random_rotation=True)
+      img_batch = [rotate_img(offset_img(img_data[idx])) for idx in perm[i:i+parameters['batchsize']]
+      tiled_batch = [tile_img(im, parameters['input_dims']) for im in img_batch]
+      label_batch = [img_labels[idx] for idx in perm[i:i+parameters['batchsize']]]
 
     if (GPU_on):
-      data_batch = cuda.to_gpu(data_batch)
+      tiled_batch = cuda.to_gpu(data_batch)
       label_batch = cuda.to_gpu(label_batch)
 
     # convert to chainer variable
-    x = Variable(xp.asarray(data_batch))
+    x = Variable(xp.asarray(tiled_batch))
     t = Variable(xp.asarray(label_batch))
 
     model.zerograds()
@@ -217,7 +163,7 @@ def one_epoch_resnet(args,model,optimizer,cif_data,cif_labels,epoch,train):
       optimizer.update(model, x, t)
 
       if epoch == 1 and num == 0:
-        with open('{}/graph.dot'.format(args.result_dir), 'w') as o:
+        with open('{}/graph.dot'.format(parameters['result_dir']), 'w') as o:
           g = computational_graph.build_computational_graph(
             (model.loss, ), remove_split=True)
           o.write(g.dump())
@@ -232,9 +178,9 @@ def one_epoch_resnet(args,model,optimizer,cif_data,cif_labels,epoch,train):
       num += t.data.shape[0]
     del x,t
 
-  if train and (epoch == 1 or epoch % args.snapshot == 0):
-    model_fn = '{}/epoch-{}.model'.format(args.result_dir, epoch)
-    opt_fn = '{}/epoch-{}.state'.format(args.result_dir, epoch)
+  if train and (epoch == 1 or epoch % parameters['snapshot'] == 0):
+    model_fn = '{}/epoch-{}.model'.format(parameters['result_dir'], epoch)
+    opt_fn = '{}/epoch-{}.state'.format(parameters['result_dir'], epoch)
     serializers.save_hdf5(model_fn, model)
     serializers.save_hdf5(opt_fn, optimizer)
 
@@ -244,51 +190,103 @@ def one_epoch_resnet(args,model,optimizer,cif_data,cif_labels,epoch,train):
   else:
     logging.info('epoch:%d\ttest accuracy:%0.4f'%(epoch,sum_accuracy/num))
 
+def get_model_optimizer(parameters):
+    model_path = os.path.join(os.getcwd(),'Models',parameters['model_name']+'.py')
+    model = imp.load_source(parameters['model_name'], model_path).model
+
+    dst = '%s/%s' % (parameters['result_dir'], model_path)
+    if not os.path.exists(dst):
+      shutil.copy(model_path, dst)
+
+    dst = '%s/%s' % (parameters['result_dir'], os.path.basename(__file__))
+    if not os.path.exists(dst):
+      shutil.copy(__file__, dst)
+
+    # prepare model
+    if parameters['gpu'] >= 0:
+      cuda.get_device(parameters['gpu']).use()
+      model.to_gpu()
+
+    # prepare optimizer
+    if parameters['optimizer'] == 'MomentumSGD':
+      optimizer = optimizers.MomentumSGD(lr=parameters['learning_rate'], momentum=parameters['momentum'])
+    elif parameters['optimizer'] == 'Adam':
+      optimizer = optimizers.Adam(alpha=parameters['alpha'])
+    elif parameters['optimizer'] == 'AdaGrad':
+      optimizer = optimizers.AdaGrad(lr=parameters['learning_rate'])
+    elif parameters['optimizer'] == 'RMSprop':
+      optimizer = optimizers.RMSprop(lr=parameters['learning_rate'],alpha=parameters['alpha'])
+    else:
+      raise Exception('No optimizer is selected')
+
+    optimizer.setup(model)
+
+    if args.opt == 'MomentumSGD':
+      optimizer.add_hook(
+        chainer.optimizer.WeightDecay(parameters['weight_decay']))
+    return model, optimizer
+
+
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser()
-  parser.add_argument('--model', type=str, default='models/VGG.py')
-  parser.add_argument('--gpu', type=int, default=0)
-  parser.add_argument('--epoch', type=int, default=170)
-  parser.add_argument('--batchsize', type=int, default=128) #128
-  parser.add_argument('--snapshot', type=int, default=10)
-  parser.add_argument('--datadir', type=str, default='data')
-  parser.add_argument('--augment', action='store_true', default=False)
+  # Parameters
+  parameters = {
+  'data_file': 'SpinelData_0.5A.hdf5',
+  'model_name': 'TestModel',
+  'optimizer': 'MomentumSGD',
+  'input_dims': [32,32,32],
+  'train_test_split': 0.1,
+  'learning_rate': 0.1,
+  'decay_ratio': 0.1,
+  'decay_freq': 1,
+  'momentum': 0.9,
+  'weight_decay': 0.0001,
+  'alpha': 0.001,
+  'num_epochs': 200,
+  'batchsize': 64,
+  'gpu': 0,
+  'snapshot': 10,
+  'validate_freq': 1
+  }
+  
+  # Set up logging
 
-  # optimization
-  parser.add_argument('--opt', type=str, default='MomentumSGD',
-            choices=['MomentumSGD', 'Adam', 'AdaGrad'])
-  parser.add_argument('--weight_decay', type=float, default=0.0001)
-  parser.add_argument('--alpha', type=float, default=0.001)
-  parser.add_argument('--lr', type=float, default=0.1)
-  parser.add_argument('--lr_decay_freq', type=int, default=80)
-  parser.add_argument('--lr_decay_ratio', type=float, default=0.1)
-  parser.add_argument('--validate_freq', type=int, default=1)
-  parser.add_argument('--seed', type=int, default=1701)
+  if len(sys.argv) > 1:
+    dir_name = sys.argv[2]
+  else:
+    dir_name = parameters['model_name']
+  dir_name = 'Results/%s_%s'%(dir_name,time.asctime())
 
-  args = parser.parse_args()
-  np.random.seed(args.seed)
-  # os.environ['CHAINER_TYPE_CHECK'] = str(args.type_check)
-  # os.environ['CHAINER_SEED'] = str(args.seed)
-
-  # create result dir
-  create_result_dir(args)
+  parameters['result_dir'] = os.path.join(os.getcwd(),dir_name)
+  os.makedirs(parameters['result_dir'])
+  logging.basicConfig(
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        filename="%s/log.txt"%parameters['result_dir'], level=logging.DEBUG)
 
   # create model and optimizer
-  model, optimizer = get_model_optimizer(args)
+  # model, optimizer = get_model_optimizer(args)
 
-  dataset = load_hdf5(args.augment)
-  tr_data, tr_labels, te_data, te_labels = dataset
+  imgs, labels = load_data(parameters['data_file'])
+
+  # Randomize and split train / test
+  np.random.seed(int(time.time()))
+  nimgs = len(labels)
+  perm = np.random.permutation(nimgs)
+  test_idxs = perm[:nimgs*parameters['train_test_split']]
+  train_idxs = perm[nimgs*parameters['train_test_split']:]
+
+  train_imgs = [imgs[i] for i in train_idxs]
+  train_labels = [labels[i] for i in train_idxs]
+  test_imgs = [imgs[i] for i in test_idxs]
+  test_labels = [labels[i] for i in test_idxs]
+
 
   # learning loop
-  for epoch in range(1, args.epoch + 1):
+  for epoch in range(1, parameters['num_epochs'] + 1):
     logging.info('learning rate:{}'.format(optimizer.lr))
+    one_epoch(parameters,model,optimizer,train_imgs,train_labels,epoch,True)
 
-    one_epoch_resnet(args,model,optimizer,tr_data,tr_labels,epoch,True)
-    model.save()
-    # one_epoch(args, model, optimizer, tr_data, tr_labels, epoch, True)
+    if epoch == 1 or epoch % parameters['validate_freq'] == 0:
+      one_epoch(parameters, model, optimizer, test_imgs, test_labels, epoch, False)
 
-    if epoch == 1 or epoch % args.validate_freq == 0:
-      one_epoch_resnet(args, model, optimizer, te_data, te_labels, epoch, False)
-
-    if args.opt == 'MomentumSGD' and epoch % args.lr_decay_freq == 0:
-      optimizer.lr *= args.lr_decay_ratio
+    if parameters['optimizer'] == 'MomentumSGD' and epoch % parameters['decay_freq'] == 0:
+      optimizer.lr *= parameters['decay_ratio']
