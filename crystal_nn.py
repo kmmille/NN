@@ -249,7 +249,6 @@ if __name__ == '__main__':
   }
   
   # Set up logging
-
   if len(sys.argv) > 1:
     dir_name = sys.argv[2]
   else:
@@ -262,9 +261,10 @@ if __name__ == '__main__':
         format='%(asctime)s [%(levelname)s] %(message)s',
         filename="%s/log.txt"%parameters['result_dir'], level=logging.DEBUG)
 
-  # create model and optimizer
-  # model, optimizer = get_model_optimizer(args)
+  # Create model and optimizer
+  model, optimizer = get_model_optimizer(args)
 
+  # Load data
   imgs, labels = load_data(parameters['data_file'])
 
   # Randomize and split train / test
@@ -279,8 +279,7 @@ if __name__ == '__main__':
   test_imgs = [imgs[i] for i in test_idxs]
   test_labels = [labels[i] for i in test_idxs]
 
-
-  # learning loop
+  # Learning
   for epoch in range(1, parameters['num_epochs'] + 1):
     logging.info('learning rate:{}'.format(optimizer.lr))
     one_epoch(parameters,model,optimizer,train_imgs,train_labels,epoch,True)
