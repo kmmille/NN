@@ -63,12 +63,6 @@ def element_features(element):
     ATTRIBUTES_KEY['electronegativity'](element)
     ])
 
-def get_nn_feats(x,y,z):
-  pt = np.array([x,y,z])
-  neighbors = conv_struct.get_sites_in_sphere(pt=pt,r=5)
-  nearest_neighbor = [n[0] for n in sorted(neighbors, key=lambda s: s[1])][0]
-  return element_features(nearest_neighbor.specie)
-
 def make_crystal_img(cif_str, resolution=0.5):
   struct = Structure.from_str(input_string=cif_str,fmt='cif')
   sg = SpacegroupAnalyzer(struct)
@@ -87,9 +81,13 @@ def make_crystal_img(cif_str, resolution=0.5):
         y = (float(j)+0.5)/img.shape[1]*lattice_lengths[1]
         z = (float(k)+0.5)/img.shape[2]*lattice_lengths[2]
         pt = np.array([x,y,z])
-        neighbors = conv_struct.get_sites_in_sphere(pt=pt,r=5)
+        neighbors = conv_struct.get_sites_in_sphere(pt=pt,r=10)
         nearest_neighbor = [n[0] for n in sorted(neighbors, key=lambda s: s[1])][0]
-        img[i,j,k,:] = element_features(nearest_neighbor.specie)
+        features = element_features(nearest_neighbor.specie)
+        if all([f != 'failed' for f in features]):
+          img[i,j,k,:] = features
+        else:
+          return 'failed'
   return img
 
 
